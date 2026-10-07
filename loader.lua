@@ -64,8 +64,7 @@ end
 ----------------------------------------------------
 local selectedRarity = "Ethereal"
 local TWEEN_SPEED = 300
-local WAIT_AT_EGG = 2.5
-local PICKUP_DELAY = 0.25
+local WAIT_AT_EGG = 0.5 -- Reduced wait time to prevent engine overload
 local runCount = 5
 
 local noClipEnabled = true
@@ -281,7 +280,7 @@ local function getMyPlotPosition()
 	return Vector3.new(0, 10, 0)
 end
 
--- 6. TWEEN & PICKUP
+-- 6. TWEEN & SAFE PICKUP (CRASH FIX APPLIED HERE)
 local function tweenToPosition(targetPosition)
 	local character = localPlayer.Character or localPlayer.CharacterAdded:Wait()
 	local rootPart = character:WaitForChild("HumanoidRootPart", 5)
@@ -326,31 +325,40 @@ local function safeWaitTween(tween)
 	end)
 end
 
-local function autoPickUpTarget(eggObj, duration)
-	local startTime = os.clock()
-	while os.clock() - startTime < duration do
-		if not isRunning then break end
-		local character = localPlayer.Character
-		if character and character:FindFirstChild("HumanoidRootPart") then
-			local rootPart = character.HumanoidRootPart
-			if eggObj and eggObj.Parent then
-				for _, prompt in ipairs(eggObj:GetDescendants()) do
-					if prompt:IsA("ProximityPrompt") then
-						prompt.HoldDuration = 0
-						pcall(fireproximityprompt, prompt)
-					end
-				end
-				for _, part in ipairs(eggObj:GetDescendants()) do
-					if part:IsA("BasePart") then
-						pcall(firetouchinterest, rootPart, part, 0)
-						task.wait(0.02)
-						pcall(firetouchinterest, rootPart, part, 1)
-					end
+-- FIX: Safe, single-trigger pickup method to prevent memory overload/crashes
+local function autoPickUpTarget(eggObj)
+	if not isRunning or not eggObj or not eggObj.Parent then return end
+	
+	local character = localPlayer.Character
+	if not character then return end
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return end
+
+	-- Single execution for proximity prompts
+	pcall(function()
+		for _, prompt in ipairs(eggObj:GetDescendants()) do
+			if prompt:IsA("ProximityPrompt") then
+				prompt.HoldDuration = 0
+				if fireproximityprompt then
+					fireproximityprompt(prompt)
 				end
 			end
 		end
-		task.wait(PICKUP_DELAY)
-	end
+	end)
+
+	-- Safe touch interaction without memory flooding
+	pcall(function()
+		for _, part in ipairs(eggObj:GetDescendants()) do
+			if part:IsA("BasePart") and firetouchinterest then
+				firetouchinterest(rootPart, part, 0)
+				task.wait(0.05)
+				firetouchinterest(rootPart, part, 1)
+				break -- Touching one main part is sufficient
+			end
+		end
+	end)
+
+	task.wait(WAIT_AT_EGG)
 end
 
 -- 7. SERVER HOP & BOOST
@@ -404,7 +412,8 @@ local function cleanupAll()
 		char.HumanoidRootPart.AssemblyLinearVelocity = Vector3.zero
 		char.HumanoidRootPart.AssemblyAngularVelocity = Vector3.zero
 	end
-	collectgarbage("collect")
+	
+	pcall(function() collectgarbage("count") end)
 end
 
 ----------------------------------------------------
@@ -412,7 +421,7 @@ end
 ----------------------------------------------------
 local Window = Fluent:CreateWindow({
 	Title = "FluentPro",
-	SubTitle = "Fixed Edition",
+	SubTitle = "Crash-Proof Edition",
 	TabWidth = 130,
 	Size = UDim2.fromOffset(480, 340),
 	Acrylic = false,
@@ -547,9 +556,10 @@ Tabs.Main:AddToggle("AutoStealEgg", {
 									local toEggTween = tweenToPosition(eggPos)
 									safeWaitTween(toEggTween)
 
-									if not isRunning then break end
+									if not isRunning or not eggObj.Parent then continue end
 
-									autoPickUpTarget(eggObj, WAIT_AT_EGG)
+									-- Safe pickup call without loop lag
+									autoPickUpTarget(eggObj)
 
 									if not isRunning then break end
 
@@ -557,12 +567,12 @@ Tabs.Main:AddToggle("AutoStealEgg", {
 									local toPlotTween = tweenToPosition(targetPlotPos)
 									safeWaitTween(toPlotTween)
 
-									task.wait(0.5)
+									task.wait(0.3)
 								end
 							end
 						end
 
-						collectgarbage("step", 100)
+						pcall(function() collectgarbage("count") end)
 					end
 				end)
 
@@ -626,6 +636,6 @@ applyPerformanceBoost(true)
 
 Fluent:Notify({
 	Title = "FluentPro Active",
-	Content = "UI loaded & running!",
+	Content = "Crash fix applied!",
 	Duration = 4
 })
