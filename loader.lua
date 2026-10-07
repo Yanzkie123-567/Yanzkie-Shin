@@ -33,38 +33,30 @@ pcall(function()
 end)
 
 ----------------------------------------------------
--- MULTI-SOURCE UI LOADER (FLUENT WITH FALLBACK)
+-- ROBUST MULTI-MIRROR FLUENT LOADER
 ----------------------------------------------------
 local Fluent = nil
-local libraryType = "Fluent"
 
-local function fetchLibrary(urls)
-	for _, url in ipairs(urls) do
-		local success, result = pcall(function()
-			return loadstring(game:HttpGet(url))()
-		end)
-		if success and result then
-			return result
-		end
-	end
-	return nil
-end
-
--- Try Fluent CDNs
-Fluent = fetchLibrary({
+local fluentSources = {
 	"https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua",
 	"https://raw.githubusercontent.com/dawid-scripts/Fluent/master/main.lua",
 	"https://raw.githubusercontent.com/dawid-scripts/Fluent/main/main.lua",
 	"https://cdn.jsdelivr.net/gh/dawid-scripts/Fluent@main/main.lua"
-})
+}
 
--- If Fluent fails completely, load fallback UI library (Kavo UI)
+for _, url in ipairs(fluentSources) do
+	local success, result = pcall(function()
+		return loadstring(game:HttpGet(url))()
+	end)
+	if success and result then
+		Fluent = result
+		break
+	end
+end
+
 if not Fluent then
-	libraryType = "Fallback"
-	Fluent = fetchLibrary({
-		"https://raw.githubusercontent.com/xHeptc/Kavo-UI-Library/main/source.lua",
-		"https://cdn.jsdelivr.net/gh/xHeptc/Kavo-UI-Library@main/source.lua"
-	})
+	warn("[Fluent Error] Could not reach any Fluent UI source link.")
+	return
 end
 
 ----------------------------------------------------
@@ -92,15 +84,6 @@ local ETHEREAL_EGG_NAMES = {
 	"solaris egg", "solaris",
 	"cherub egg", "cherub",
 	"volcanic egg", "volcanic"
-}
-
-local ANIME_PRESETS = {
-	["Solo Leveling"] = "rbxassetid://16723223078",
-	["Jujutsu Kaisen"] = "rbxassetid://11681287958",
-	["Demon Slayer"] = "rbxassetid://11438992080",
-	["Cyberpunk Anime"] = "rbxassetid://11326410298",
-	["Attack on Titan"] = "rbxassetid://11438991448",
-	["None (Purple Theme)"] = ""
 }
 
 ----------------------------------------------------
@@ -425,154 +408,176 @@ local function cleanupAll()
 end
 
 ----------------------------------------------------
--- UI INITIALIZATION (FLUENT OR FALLBACK)
+-- WINDOW INITIALIZATION
 ----------------------------------------------------
-local Window = nil
-local mainTab = nil
-local settingsTab = nil
+local Window = Fluent:CreateWindow({
+	Title = "FluentPro",
+	SubTitle = "Fixed Edition",
+	TabWidth = 130,
+	Size = UDim2.fromOffset(480, 340),
+	Acrylic = false,
+	Theme = "Amethyst"
+})
 
-if libraryType == "Fluent" and Fluent then
-	Window = Fluent:CreateWindow({
-		Title = "FluentPro",
-		SubTitle = "Mobile Edition",
-		TabWidth = 130,
-		Size = UDim2.fromOffset(480, 340),
-		Acrylic = false,
-		Theme = "Amethyst"
-	})
+local Tabs = {
+	Main = Window:AddTab({ Title = "Main", Icon = "egg" })
+}
 
-	mainTab = Window:AddTab({ Title = "Main", Icon = "egg" })
-	settingsTab = Window:AddTab({ Title = "Background", Icon = "image" })
+-- Target Rarity Dropdown
+Tabs.Main:AddDropdown("TargetRarity", {
+	Title = "Target Rarity",
+	Values = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Ethereal", "All"},
+	Default = "Ethereal",
+	Callback = function(Value)
+		selectedRarity = Value
+	end
+})
 
-	-- Fluent Dropdowns & Controls
-	mainTab:AddDropdown("TargetRarity", {
-		Title = "Target Rarity",
-		Values = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Ethereal", "All"},
-		Default = "Ethereal",
-		Callback = function(v) selectedRarity = v end
-	})
+-- Tween Speed
+Tabs.Main:AddSlider("TweenSpeed", {
+	Title = "Tween Speed",
+	Description = "Movement speed towards eggs",
+	Default = TWEEN_SPEED,
+	Min = 100,
+	Max = 1000,
+	Rounding = 0,
+	Callback = function(Value)
+		TWEEN_SPEED = tonumber(Value) or 300
+	end
+})
 
-	mainTab:AddSlider("TweenSpeed", {
-		Title = "Tween Speed",
-		Default = TWEEN_SPEED, Min = 100, Max = 1000, Rounding = 0,
-		Callback = function(v) TWEEN_SPEED = tonumber(v) or 300 end
-	})
-
-	mainTab:AddInput("LoopCyclesInput", {
-		Title = "Loop Cycles",
-		Default = tostring(runCount),
-		Numeric = true, Finished = true,
-		Callback = function(v)
-			local num = tonumber(v)
-			runCount = (num and num > 0) and math.min(math.floor(num), 1000) or 5
+-- Loop Cycles Input
+Tabs.Main:AddInput("LoopCyclesInput", {
+	Title = "Loop Cycles",
+	Description = "Type number of passes (Max: 1000)",
+	Default = tostring(runCount),
+	Placeholder = "Enter 1 - 1000",
+	Numeric = true,
+	Finished = true,
+	Callback = function(Value)
+		local num = tonumber(Value)
+		if num and num > 0 then
+			runCount = math.min(math.floor(num), 1000)
+		else
+			runCount = 5
 		end
-	})
+	end
+})
 
-	mainTab:AddToggle("NoClip", { Title = "Smart Floor-Safe No-Clip", Default = true, Callback = function(v) noClipEnabled = v end })
-	mainTab:AddToggle("RemoveShake", { Title = "Remove Screen Shake", Default = true, Callback = function(v) removeShakeEnabled = v; disableScreenShake(v) end })
-	mainTab:AddToggle("PerformanceBoost", { Title = "FPS Boost", Default = true, Callback = function(v) performanceBoostEnabled = v; applyPerformanceBoost(v) end })
-	mainTab:AddToggle("AutoServerHop", { Title = "Auto Server Hop", Default = false, Callback = function(v) autoServerHopEnabled = v end })
+-- Toggles
+Tabs.Main:AddToggle("NoClip", {
+	Title = "Smart Floor-Safe No-Clip",
+	Default = true,
+	Callback = function(Value)
+		noClipEnabled = Value
+		if not isRunning then setNoClip(noClipEnabled) end
+	end
+})
 
-	mainTab:AddToggle("AutoStealEgg", {
-		Title = "Auto Steal Egg",
-		Default = false,
-		Callback = function(v)
-			isRunning = v
-			if isRunning then
-				if localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart") then
-					homePlotPosition = localPlayer.Character.HumanoidRootPart.Position
-				end
-				if noClipEnabled then setNoClip(true) end
-				if removeShakeEnabled then disableScreenShake(true) end
-				if performanceBoostEnabled then applyPerformanceBoost(true) end
+Tabs.Main:AddToggle("RemoveShake", {
+	Title = "Remove Screen Shake",
+	Default = true,
+	Callback = function(Value)
+		removeShakeEnabled = Value
+		disableScreenShake(removeShakeEnabled)
+	end
+})
 
-				task.spawn(function()
-					pcall(function()
-						for cycle = 1, runCount do
-							if not isRunning then break end
-							local activeEggObjects = getActiveEggObjects()
-							if #activeEggObjects == 0 then
-								if autoServerHopEnabled then task.wait(1); serverHop(); break else task.wait(2) end
-							else
-								for _, eggObj in ipairs(activeEggObjects) do
-									if not isRunning or not eggObj or not eggObj.Parent then continue end
-									local eggPos = (eggObj:IsA("Model") and (eggObj.PrimaryPart and eggObj.PrimaryPart.Position or eggObj:GetPivot().Position)) or eggObj.Position
-									if eggPos then
-										safeWaitTween(tweenToPosition(eggPos))
-										if not isRunning then break end
-										autoPickUpTarget(eggObj, WAIT_AT_EGG)
-										if not isRunning then break end
-										safeWaitTween(tweenToPosition(getMyPlotPosition()))
-										task.wait(0.5)
-									end
-								end
-							end
-						end
-					end)
-					cleanupAll()
-				end)
-			else
-				cleanupAll()
-			end
-		end
-	})
+Tabs.Main:AddToggle("PerformanceBoost", {
+	Title = "FPS Boost",
+	Default = true,
+	Callback = function(Value)
+		performanceBoostEnabled = Value
+		applyPerformanceBoost(performanceBoostEnabled)
+	end
+})
 
-	Window:SelectTab(1)
+Tabs.Main:AddToggle("AutoServerHop", {
+	Title = "Auto Server Hop",
+	Default = false,
+	Callback = function(Value)
+		autoServerHopEnabled = Value
+	end
+})
 
-else
-	-- FALLBACK UI INITIALIZATION
-	local Kavo = Fluent
-	Window = Kavo.CreateLib("FluentPro (Fallback)", "Midnight")
-	mainTab = Window:NewTab("Main"):NewSection("Stealer Controls")
+-- Auto Steal Egg Toggle
+Tabs.Main:AddToggle("AutoStealEgg", {
+	Title = "Auto Steal Egg",
+	Default = false,
+	Callback = function(Value)
+		isRunning = Value
 
-	mainTab:NewDropdown("Target Rarity", "Select Rarity", {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Ethereal", "All"}, function(v) selectedRarity = v end)
-	mainTab:NewSlider("Tween Speed", "Speed", 1000, 100, function(v) TWEEN_SPEED = tonumber(v) or 300 end)
-	mainTab:NewToggle("Smart Floor No-Clip", "NoClip", function(v) noClipEnabled = v end)
-	mainTab:NewToggle("Remove Screen Shake", "Shake", function(v) removeShakeEnabled = v; disableScreenShake(v) end)
-	mainTab:NewToggle("FPS Boost", "Boost", function(v) performanceBoostEnabled = v; applyPerformanceBoost(v) end)
-	
-	mainTab:NewToggle("Auto Steal Egg", "Start Stealing", function(v)
-		isRunning = v
 		if isRunning then
 			if localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart") then
 				homePlotPosition = localPlayer.Character.HumanoidRootPart.Position
 			end
+
 			if noClipEnabled then setNoClip(true) end
 			if removeShakeEnabled then disableScreenShake(true) end
+			if performanceBoostEnabled then applyPerformanceBoost(true) end
 
 			task.spawn(function()
 				pcall(function()
 					for cycle = 1, runCount do
 						if not isRunning then break end
+
 						local activeEggObjects = getActiveEggObjects()
+
 						if #activeEggObjects == 0 then
-							if autoServerHopEnabled then task.wait(1); serverHop(); break else task.wait(2) end
+							if autoServerHopEnabled then
+								task.wait(1)
+								serverHop()
+								break
+							else
+								task.wait(2)
+							end
 						else
-							for _, eggObj in ipairs(activeEggObjects) do
-								if not isRunning or not eggObj or not eggObj.Parent then continue end
-								local eggPos = (eggObj:IsA("Model") and (eggObj.PrimaryPart and eggObj.PrimaryPart.Position or eggObj:GetPivot().Position)) or eggObj.Position
+							for index, eggObj in ipairs(activeEggObjects) do
+								if not isRunning then break end
+								if not eggObj or not eggObj.Parent then continue end
+
+								local eggPos
+								if eggObj:IsA("Model") then
+									eggPos = (eggObj.PrimaryPart and eggObj.PrimaryPart.Position) or eggObj:GetPivot().Position
+								elseif eggObj:IsA("BasePart") then
+									eggPos = eggObj.Position
+								end
+
 								if eggPos then
-									safeWaitTween(tweenToPosition(eggPos))
+									local toEggTween = tweenToPosition(eggPos)
+									safeWaitTween(toEggTween)
+
 									if not isRunning then break end
+
 									autoPickUpTarget(eggObj, WAIT_AT_EGG)
+
 									if not isRunning then break end
-									safeWaitTween(tweenToPosition(getMyPlotPosition()))
+
+									local targetPlotPos = getMyPlotPosition()
+									local toPlotTween = tweenToPosition(targetPlotPos)
+									safeWaitTween(toPlotTween)
+
 									task.wait(0.5)
 								end
 							end
 						end
+
+						collectgarbage("step", 100)
 					end
 				end)
+
 				cleanupAll()
 			end)
 		else
 			cleanupAll()
 		end
-	end)
-end
+	end
+})
+
+Window:SelectTab(1)
 
 ----------------------------------------------------
--- DRAGGABLE TOGGLE BUTTON FOR UI
+-- DRAGGABLE TOGGLE BUTTON FOR MOBILE
 ----------------------------------------------------
 task.spawn(function()
 	pcall(function()
@@ -610,13 +615,17 @@ task.spawn(function()
 		local isVisible = true
 		button.MouseButton1Click:Connect(function()
 			isVisible = not isVisible
-			if libraryType == "Fluent" and Window and Window.Root then
+			if Window and Window.Root then
 				Window.Root.Visible = isVisible
-			else
-				pcall(function() game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.RightControl, false, game) end)
 			end
 		end)
 	end)
 end)
 
-applyPerformanceBoost(t
+applyPerformanceBoost(true)
+
+Fluent:Notify({
+	Title = "FluentPro Active",
+	Content = "UI loaded & running!",
+	Duration = 4
+})
