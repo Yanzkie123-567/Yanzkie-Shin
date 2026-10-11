@@ -56,7 +56,7 @@ local Config = {
 	-- Halloween Event: High-Warp & Vertical Descent Pipeline
 	SafeHoverHeight = 35,       -- Height above delivery pad (studs)
 	SafeDescentSpeed = 110,      -- Downward vertical descent speed (studs/s)
-	PreWarpDelay = 0.3,         -- Micro-buffer to clear travel velocity history
+	PreWarpDelay = 0.4,         -- Micro-buffer to clear travel velocity history
 	MinCandyTokens = 3,         -- Prioritizes 3+, 4+, 5+ token candies
 	AllowLesserTokensFallback = true,
 	CandyDropOffEnabled = true,
