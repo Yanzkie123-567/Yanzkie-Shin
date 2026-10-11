@@ -54,8 +54,8 @@ local Config = {
 	AnchorDuringFlight = true,
 
 	-- Halloween Event: High-Warp & Vertical Descent Pipeline
-	SafeHoverHeight = 70,       -- Height above delivery pad (studs)
-	SafeDescentSpeed = 120,      -- Downward vertical descent speed (studs/s)
+	SafeHoverHeight = 100,       -- Height above delivery pad (studs)
+	SafeDescentSpeed = 110,      -- Downward vertical descent speed (studs/s)
 	PreWarpDelay = 0.4,         -- Micro-buffer to clear travel velocity history
 	MinCandyTokens = 3,         -- Prioritizes 3+, 4+, 5+ token candies
 	AllowLesserTokensFallback = true,
@@ -1287,7 +1287,7 @@ Tabs.Halloween:AddSlider("HoverHeightSlider", {
 	Description = "Height above pad to snap before beginning vertical descent (Default: 35)",
 	Default = Config.SafeHoverHeight,
 	Min = 15,
-	Max = 80,
+	Max = 200,
 	Rounding = 0,
 	Callback = function(val) Config.SafeHoverHeight = tonumber(val) or 35 end
 })
