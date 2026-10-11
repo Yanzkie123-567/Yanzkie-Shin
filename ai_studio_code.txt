@@ -1,0 +1,1545 @@
+--------------------------------------------------------------------------------
+-- FLUENTPRO: AUTONOMOUS HARVESTER & HALLOWEEN EVENT ENGINE
+-- Architecture: Hybrid Transport Pipeline (Instant Outbound + Safe Inbound)
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- 1. SERVICES & SYSTEM DECLARATIONS
+--------------------------------------------------------------------------------
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local PathfindingService = game:GetService("PathfindingService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local localPlayer = Players.LocalPlayer
+assert(localPlayer, "[FluentPro] LocalPlayer instance unavailable.")
+
+-- Clean up lingering dark shadows from previous executions
+pcall(function()
+	local targets = {CoreGui, localPlayer:FindFirstChildOfClass("PlayerGui")}
+	if gethui then table.insert(targets, gethui()) end
+	for _, container in ipairs(targets) do
+		if container then
+			for _, item in ipairs(container:GetDescendants()) do
+				if item.Name == "RayfieldDepthShadow" then
+					item:Destroy()
+				end
+			end
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- 2. RUNTIME CONFIGURATION & REACTIVE STATE
+--------------------------------------------------------------------------------
+local Config = {
+	-- Targeting (Eggs)
+	TargetRarity = "Ethereal",
+	PlotRadius = 55,
+	CheckBoundingBox = true,
+
+	-- Movement
+	MovementMode = "Sky Cruise (Anti-Obstacle)",
+	OutboundSpeed = 200,
+	ReturnSpeed = 80, -- Server-safe delivery speed (prevents CODE AT-XXXX)
+	WalkSpeed = 32,
+	CruiseAltitude = 30,
+	AnchorDuringFlight = true,
+
+	-- Halloween Event (Hybrid Delivery Pipeline)
+	FastOutboundTeleport = true, -- Instantly teleports to candies when hands are empty
+	MinCandyTokens = 3, -- Prioritizes candies giving 3+ tokens
+	AllowLesserTokensFallback = true,
+	CandyDropOffEnabled = true,
+	PreDropOffDelay = 0.3,
+	CandyWaitDelay = 0.25,
+
+	-- Timing & Humanization
+	HumanizeEnabled = true,
+	MinPreDelay = 0.15,
+	MaxPreDelay = 0.35,
+	WaitAtEgg = 0.40,
+	RunCycles = 5,
+
+	-- Protections
+	NoClipEnabled = true,
+	RemoveShakeEnabled = true,
+	PerformanceBoost = false,
+	AutoServerHop = false,
+	MaxFailedAttempts = 2,
+	BlacklistDuration = 15
+}
+
+local State = {
+	IsRunning = false,
+	IsCandyRunning = false,
+	CurrentTarget = nil,
+	CurrentCandyTarget = nil,
+	CurrentTween = nil,
+	HomePlotPosition = nil,
+	HomePlotModel = nil,
+	CandyDropOffInstance = nil,
+	CandyDropOffPosition = nil,
+	EggsStolenCount = 0,
+	CandiesStolenCount = 0,
+	CurrentStatus = "Idle",
+	CandyStatus = "Idle",
+	FailedEggCache = {},
+	Connections = {},
+	UIElements = {}
+}
+
+local FORBIDDEN_PROMPT_KEYWORDS = {
+	"open", "hatch", "buy", "purchase", "unlock", "roll", "craft", "draw", "spin", "upgrade"
+}
+
+--------------------------------------------------------------------------------
+-- 3. ANTI-KICK & ANTI-AFK SHIELD
+--------------------------------------------------------------------------------
+local function initializeAntiKick()
+	pcall(function()
+		local VirtualUser = game:GetService("VirtualUser")
+		localPlayer.Idled:Connect(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton2(Vector2.new(0, 0))
+		end)
+
+		if hookmetamethod then
+			local oldNamecall
+			oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+				local method = getnamecallmethod()
+				if method == "Kick" or method == "kick" then
+					warn("[FluentPro Shield] Blocked client kick attempt.")
+					return nil
+				end
+				return oldNamecall(self, ...)
+			end)
+		end
+	end)
+end
+initializeAntiKick()
+
+--------------------------------------------------------------------------------
+-- 4. FLUENT UI LOADER
+--------------------------------------------------------------------------------
+local Fluent = nil
+local fluentSources = {
+	"https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua",
+	"https://raw.githubusercontent.com/dawid-scripts/Fluent/master/main.lua",
+	"https://raw.githubusercontent.com/dawid-scripts/Fluent/main/main.lua",
+	"https://cdn.jsdelivr.net/gh/dawid-scripts/Fluent@main/main.lua"
+}
+
+for _, url in ipairs(fluentSources) do
+	local ok, result = pcall(function()
+		return loadstring(game:HttpGet(url))()
+	end)
+	if ok and result then
+		Fluent = result
+		break
+	end
+end
+
+if not Fluent then
+	warn("[FluentPro Fatal] Failed to reach Fluent UI repositories.")
+	return
+end
+
+--------------------------------------------------------------------------------
+-- 5. TELEMETRY & CARRIED STATE DETECTOR
+--------------------------------------------------------------------------------
+local function updateStatus(text)
+	State.CurrentStatus = text
+	if State.UIElements.StatusParagraph then
+		State.UIElements.StatusParagraph:SetDesc(
+			"Status: " .. State.CurrentStatus .. "\n" ..
+			"Eggs Stolen: " .. tostring(State.EggsStolenCount) .. "\n" ..
+			"Active Target: " .. (State.CurrentTarget and State.CurrentTarget.Name or "None")
+		)
+	end
+end
+
+local function getCarriedCandyCount()
+	local val = 0
+	pcall(function()
+		local nsd = localPlayer:FindFirstChild("NoSaveData")
+		if nsd and nsd:FindFirstChild("CarriedCandy") then
+			val = nsd.CarriedCandy.Value
+		end
+	end)
+	return tonumber(val) or 0
+end
+
+local function updateCandyStatus(text)
+	State.CandyStatus = text
+	if State.UIElements.CandyParagraph then
+		State.UIElements.CandyParagraph:SetDesc(
+			"Status: " .. State.CandyStatus .. "\n" ..
+			"Tokens / Deposits: " .. tostring(State.CandiesStolenCount) .. "\n" ..
+			"CarriedCandy: " .. tostring(getCarriedCandyCount())
+		)
+	end
+end
+
+local function humanDelay(minWait, maxWait)
+	if not Config.HumanizeEnabled then
+		task.wait(minWait or 0.1)
+		return
+	end
+	local rMin = math.floor((minWait or Config.MinPreDelay) * 1000)
+	local rMax = math.floor((maxWait or Config.MaxPreDelay) * 1000)
+	if rMax <= rMin then rMax = rMin + 50 end
+	task.wait(math.random(rMin, rMax) / 1000)
+end
+
+local function getCharacterParts()
+	local char = localPlayer.Character
+	if not char then return nil, nil, nil end
+	return char, char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getObjectPosition(obj)
+	if not obj or not obj.Parent then return nil end
+	if obj:IsA("Model") then
+		if obj.PrimaryPart then return obj.PrimaryPart.Position end
+		local ok, cf = pcall(function() return obj:GetPivot() end)
+		if ok and cf then return cf.Position end
+	elseif obj:IsA("BasePart") then
+		return obj.Position
+	elseif obj:IsA("Folder") then
+		local part = obj:FindFirstChildWhichIsA("BasePart", true)
+		if part then return part.Position end
+		if obj.Parent and obj.Parent:IsA("Model") then
+			local ok, cf = pcall(function() return obj.Parent:GetPivot() end)
+			if ok and cf then return cf.Position end
+		end
+	end
+	return nil
+end
+
+local function pointInRotatedBox(point, boxCFrame, boxSize)
+	local relative = boxCFrame:PointToObjectSpace(point)
+	local half = boxSize * 0.5
+	return math.abs(relative.X) <= half.X
+		and math.abs(relative.Y) <= half.Y
+		and math.abs(relative.Z) <= half.Z
+end
+
+local function resolvePlotPosition(obj)
+	if not obj then return nil, nil end
+
+	local targetModel = nil
+	if obj:IsA("Model") then
+		targetModel = obj
+	elseif obj.Parent and obj.Parent:IsA("Model") then
+		targetModel = obj.Parent
+	end
+
+	if targetModel then
+		local ok, cf = pcall(function() return targetModel:GetPivot() end)
+		if ok and cf then return targetModel, cf.Position end
+		if targetModel.PrimaryPart then return targetModel, targetModel.PrimaryPart.Position end
+	end
+
+	local fallbackPart = obj:FindFirstChildWhichIsA("BasePart", true) 
+		or (targetModel and targetModel:FindFirstChildWhichIsA("BasePart", true))
+	if fallbackPart then
+		return targetModel or fallbackPart, fallbackPart.Position
+	end
+
+	return nil, nil
+end
+
+local function autoDetectMyPlot()
+	local myName = string.lower(localPlayer.Name)
+	local myUserId = tostring(localPlayer.UserId)
+	local myDisplayName = string.lower(localPlayer.DisplayName)
+
+	local function isOwnerMatch(val)
+		if not val then return false end
+		if val == localPlayer then return true end
+		local s = string.lower(tostring(val))
+		return s == myName or s == myUserId or s == myDisplayName
+	end
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") or obj:IsA("Folder") then
+			local matched = false
+
+			local ownerVal = obj:FindFirstChild("Owner") 
+				or obj:FindFirstChild("OwnerName") 
+				or obj:FindFirstChild("Player") 
+				or obj:FindFirstChild("ClaimedBy") 
+				or obj:FindFirstChild("UserId")
+
+			if ownerVal and isOwnerMatch(ownerVal.Value) then matched = true end
+
+			if not matched then
+				local attrOwner = obj:GetAttribute("Owner") 
+					or obj:GetAttribute("OwnerName") 
+					or obj:GetAttribute("Player") 
+					or obj:GetAttribute("UserId")
+				if attrOwner and isOwnerMatch(attrOwner) then matched = true end
+			end
+
+			if matched then
+				local model, pos = resolvePlotPosition(obj)
+				if pos then
+					State.HomePlotModel = model
+					State.HomePlotPosition = pos
+					return State.HomePlotPosition
+				end
+			end
+		end
+	end
+
+	local _, hrp = getCharacterParts()
+	if hrp then
+		State.HomePlotPosition = hrp.Position
+		return State.HomePlotPosition
+	end
+
+	State.HomePlotPosition = Vector3.new(0, 10, 0)
+	return State.HomePlotPosition
+end
+
+local function getMyPlotPosition()
+	return State.HomePlotPosition or autoDetectMyPlot()
+end
+
+local function isEggOnPlot(obj)
+	if not obj then return true end
+	local eggPos = getObjectPosition(obj)
+	local plotPos = getMyPlotPosition()
+
+	if eggPos and plotPos and (eggPos - plotPos).Magnitude <= Config.PlotRadius then
+		return true
+	end
+
+	if Config.CheckBoundingBox and State.HomePlotModel and State.HomePlotModel:IsA("Model") and eggPos then
+		local success, cf, size = pcall(function() return State.HomePlotModel:GetBoundingBox() end)
+		if success and cf and size then
+			if pointInRotatedBox(eggPos, cf, size + Vector3.new(8, 8, 8)) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function isEggBlacklisted(eggObj)
+	local expireTime = State.FailedEggCache[eggObj]
+	if not expireTime then return false end
+	if os.clock() < expireTime then return true end
+	State.FailedEggCache[eggObj] = nil
+	return false
+end
+
+--------------------------------------------------------------------------------
+-- 6. NOCLIP & CAMERA CONTROLS
+--------------------------------------------------------------------------------
+local function setNoClip(enable)
+	if enable then
+		if State.Connections.NoClip then return end
+		local stepEvent = RunService.PreSimulation or RunService.Stepped
+
+		State.Connections.NoClip = stepEvent:Connect(function()
+			local char, hrp, hum = getCharacterParts()
+			if not char or not hrp then return end
+
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") and part.CanCollide then
+					part.CanCollide = false
+				end
+			end
+
+			if hum then
+				hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+			end
+		end)
+	else
+		if State.Connections.NoClip then
+			State.Connections.NoClip:Disconnect()
+			State.Connections.NoClip = nil
+		end
+
+		local char, hrp, hum = getCharacterParts()
+		if char then
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+					part.CanCollide = true
+				end
+			end
+			if hum then
+				hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+				hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+			end
+		end
+		if hrp then
+			hrp.AssemblyLinearVelocity = Vector3.zero
+		end
+	end
+end
+
+local function disableScreenShake(enable)
+	if enable then
+		if State.Connections.ScreenShake then return end
+		local function muteShakes(parent)
+			if not parent then return end
+			for _, scriptObj in ipairs(parent:GetDescendants()) do
+				if scriptObj:IsA("LocalScript") then
+					local n = string.lower(scriptObj.Name)
+					if string.find(n, "shake") or string.find(n, "recoil") or string.find(n, "camoffset") then
+						pcall(function() scriptObj.Disabled = true end)
+					end
+				end
+			end
+		end
+
+		muteShakes(localPlayer:FindFirstChild("PlayerScripts"))
+		muteShakes(localPlayer.Character)
+
+		State.Connections.ScreenShake = RunService.RenderStepped:Connect(function()
+			local _, _, hum = getCharacterParts()
+			if hum then hum.CameraOffset = Vector3.zero end
+		end)
+	else
+		if State.Connections.ScreenShake then
+			State.Connections.ScreenShake:Disconnect()
+			State.Connections.ScreenShake = nil
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- 7. ROBUST SPEED & MOVEMENT ENGINE
+--------------------------------------------------------------------------------
+local function executeRawTween(targetCFrame, speed)
+	local _, hrp, hum = getCharacterParts()
+	if not hrp or not hum or hum.Health <= 0 then return nil, 0 end
+
+	if State.CurrentTween then
+		pcall(function() State.CurrentTween:Cancel() end)
+		State.CurrentTween = nil
+	end
+
+	local distance = (targetCFrame.Position - hrp.Position).Magnitude
+	local safeSpeed = math.max(15, speed or Config.OutboundSpeed)
+	local duration = math.max(distance / safeSpeed, 0.05)
+
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	if Config.AnchorDuringFlight then
+		hrp.Anchored = true
+	end
+
+	local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out)
+	State.CurrentTween = TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame})
+	State.CurrentTween:Play()
+	return State.CurrentTween, duration
+end
+
+local function safeWaitTween(tween, expectedDuration, targetPosition)
+	if not tween then return false end
+	local finished = false
+	local conn = tween.Completed:Connect(function() finished = true end)
+	local startTime = os.clock()
+
+	while not finished and (os.clock() - startTime < (expectedDuration or 5) + 3) do
+		if not State.IsRunning and not State.IsCandyRunning then
+			pcall(function() tween:Cancel() end)
+			if conn then conn:Disconnect() end
+			local _, hrp = getCharacterParts()
+			if hrp then hrp.Anchored = false end
+			return false
+		end
+
+		if targetPosition then
+			local _, hrp = getCharacterParts()
+			if hrp and (hrp.Position - targetPosition).Magnitude <= 5 then
+				finished = true
+				break
+			end
+		end
+
+		task.wait(0.04)
+	end
+	if conn then conn:Disconnect() end
+	return finished
+end
+
+local function skyCruiseToPosition(targetPosition, travelSpeed, landOffset)
+	local _, hrp = getCharacterParts()
+	if not hrp then return false end
+
+	local highAltitudeY = math.max(hrp.Position.Y, targetPosition.Y) + Config.CruiseAltitude
+
+	local climbPos = Vector3.new(hrp.Position.X, highAltitudeY, hrp.Position.Z)
+	local tw1, d1 = executeRawTween(CFrame.new(climbPos), travelSpeed * 1.15)
+	if not safeWaitTween(tw1, d1, climbPos) or (not State.IsRunning and not State.IsCandyRunning) then return false end
+
+	local cruisePos = Vector3.new(targetPosition.X, highAltitudeY, targetPosition.Z)
+	local tw2, d2 = executeRawTween(CFrame.new(cruisePos), travelSpeed)
+	if not safeWaitTween(tw2, d2, cruisePos) or (not State.IsRunning and not State.IsCandyRunning) then return false end
+
+	local offset = landOffset or Vector3.new(0, 1.5, 0)
+	local landPos = targetPosition + offset
+	local tw3, d3 = executeRawTween(CFrame.new(landPos), travelSpeed)
+	return safeWaitTween(tw3, d3, landPos)
+end
+
+local function smartMoveTo(targetPosition, customSpeed, landOffset)
+	local success = false
+	local offset = landOffset or Vector3.new(0, 1.5, 0)
+	if Config.MovementMode == "Sky Cruise (Anti-Obstacle)" then
+		success = skyCruiseToPosition(targetPosition, customSpeed or Config.OutboundSpeed, offset)
+	else
+		local destPos = targetPosition + offset
+		local tw, expectedTime = executeRawTween(CFrame.new(destPos), customSpeed or Config.OutboundSpeed)
+		success = safeWaitTween(tw, expectedTime, destPos)
+	end
+
+	local _, hrp = getCharacterParts()
+	if hrp then
+		hrp.Anchored = false
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+
+	return success
+end
+
+-- Instant teleport for outbound travel when hands are empty (Anti-Cheat ignores unladen movement)
+local function safeInstantTeleport(targetCFrame)
+	local _, hrp = getCharacterParts()
+	if not hrp then return end
+	hrp.Anchored = false
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.CFrame = targetCFrame
+	task.wait(0.12)
+end
+
+--------------------------------------------------------------------------------
+-- 8. 3+ TOKEN FILTER & COMPLIANT DELIVERY PIPELINE
+--------------------------------------------------------------------------------
+local function getCandyTokenValue(object)
+	if not object then return 1 end
+
+	local amountGui = object:FindFirstChild("CandyAmount", true)
+	if amountGui then
+		local label = amountGui:FindFirstChild("Amount", true)
+		if label and label.Text ~= "" then
+			local num = tonumber(string.match(label.Text, "%d+"))
+			if num then return num end
+		end
+	end
+
+	local attr = object:GetAttribute("Amount") or object:GetAttribute("Tokens") or object:GetAttribute("Value")
+	if attr and tonumber(attr) then
+		return tonumber(attr)
+	end
+
+	local name = string.lower(object.Name)
+	if string.find(name, "candy_04") or string.find(name, "mythic") then
+		return 5
+	elseif string.find(name, "candy_03") or string.find(name, "rare") then
+		return 3
+	elseif string.find(name, "candy_02") then
+		return 2
+	end
+
+	return 1
+end
+
+local function getAllCandyCandidates()
+	local list = {}
+	local seen = {}
+
+	for _, spawnPart in ipairs(CollectionService:GetTagged("HalloweenCandySpawn")) do
+		if spawnPart:IsA("BasePart") and not seen[spawnPart] and not isEggBlacklisted(spawnPart) then
+			seen[spawnPart] = true
+			local tokens = getCandyTokenValue(spawnPart)
+			table.insert(list, {
+				Object = spawnPart,
+				Position = spawnPart.Position,
+				SpawnId = spawnPart:GetAttribute("Id") or spawnPart:GetFullName(),
+				Tokens = tokens,
+				Type = "SpawnPart"
+			})
+		end
+	end
+
+	local hwFolder = workspace:FindFirstChild("HalloweenCandy")
+	if hwFolder then
+		for _, visual in ipairs(hwFolder:GetChildren()) do
+			if visual:IsA("BasePart") and not seen[visual] and not isEggBlacklisted(visual) then
+				seen[visual] = true
+				local tokens = getCandyTokenValue(visual)
+				table.insert(list, {
+					Object = visual,
+					Position = visual.Position,
+					SpawnId = visual:GetAttribute("SpawnId") or visual.Name,
+					Tokens = tokens,
+					Type = "VisualMesh"
+				})
+			end
+		end
+	end
+
+	table.sort(list, function(a, b)
+		return a.Tokens > b.Tokens
+	end)
+
+	return list
+end
+
+local function getCandyDropOffPoint()
+	if State.CandyDropOffPosition then
+		return State.CandyDropOffInstance, State.CandyDropOffPosition
+	end
+
+	local exactDrop = workspace:FindFirstChild("CandyDropOff", true)
+	if exactDrop then
+		local pos = getObjectPosition(exactDrop)
+		if exactDrop:IsA("Model") then
+			local zone = exactDrop:FindFirstChild("Zone") or exactDrop:FindFirstChild("Box") or exactDrop:FindFirstChild("Pad")
+			if zone and zone:IsA("BasePart") then pos = zone.Position end
+		end
+		if pos then
+			State.CandyDropOffInstance = exactDrop
+			State.CandyDropOffPosition = pos
+			return exactDrop, pos
+		end
+	end
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if (obj:IsA("Model") or obj:IsA("BasePart")) and string.find(string.lower(obj.Name), "candydropoff") then
+			if not string.find(string.lower(obj.Name), "door") then
+				local pos = getObjectPosition(obj)
+				if pos then
+					State.CandyDropOffInstance = obj
+					State.CandyDropOffPosition = pos
+					return obj, pos
+				end
+			end
+		end
+	end
+
+	return nil, nil
+end
+
+-- Safe delivery: Travels at 80 studs/s to satisfy server anti-cheat checks
+local function executeTokenDeposit()
+	local dropObj, dropPos = getCandyDropOffPoint()
+	if not dropPos then
+		Fluent:Notify({ Title = "Notice", Content = "Stand inside CandyDropOff square box and click 'Set Current Location'!", Duration = 3.5 })
+		return false
+	end
+
+	updateCandyStatus("Delivering to CandyDropOff (Safe speed)...")
+
+	-- Uses 80 studs/s velocity to avoid tripping CODE AT-XXXX
+	smartMoveTo(dropPos, Config.ReturnSpeed, Vector3.new(0, 0.5, 0))
+
+	local _, hrp, hum = getCharacterParts()
+	if hrp then
+		hrp.Anchored = false
+		hrp.CFrame = CFrame.new(dropPos + Vector3.new(0, 0.5, 0))
+		if hum then hum:MoveTo(dropPos + Vector3.new(0.4, 0, 0.4)) end
+	end
+
+	local waitStart = os.clock()
+	local collected = false
+
+	while (os.clock() - waitStart < 2.0) and State.IsCandyRunning do
+		pcall(function()
+			local remotes = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("Game")
+			if remotes and remotes:FindFirstChild("HalloweenCandyDeposited") then
+				remotes.HalloweenCandyDeposited:FireServer()
+				if dropObj then remotes.HalloweenCandyDeposited:FireServer(dropObj) end
+			end
+		end)
+
+		task.wait(0.2)
+
+		if getCarriedCandyCount() == 0 then
+			collected = true
+			break
+		end
+	end
+
+	if collected then
+		State.CandiesStolenCount = State.CandiesStolenCount + 1
+		updateCandyStatus("Token Awarded! (" .. State.CandiesStolenCount .. " total)")
+		return true
+	end
+
+	return false
+end
+
+local function attemptVerifiedPickup(candyEntry)
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("Game")
+	local collectRemote = remotes and remotes:FindFirstChild("CollectCandy")
+
+	local initialCount = getCarriedCandyCount()
+	local startTime = os.clock()
+	local secured = false
+
+	while (os.clock() - startTime < 1.8) and State.IsCandyRunning do
+		if collectRemote and candyEntry.SpawnId then
+			collectRemote:FireServer(candyEntry.SpawnId)
+		end
+
+		pcall(function()
+			for _, p in ipairs(candyEntry.Object:GetDescendants()) do
+				if p:IsA("ProximityPrompt") then
+					p.Enabled = true
+					p.RequiresLineOfSight = false
+					p.HoldDuration = 0
+					if fireproximityprompt then fireproximityprompt(p) end
+				end
+			end
+		end)
+
+		if collectRemote and candyEntry.Object then
+			collectRemote:FireServer(candyEntry.Object)
+			collectRemote:FireServer(candyEntry.Object.Name)
+		end
+
+		task.wait(0.25)
+
+		if getCarriedCandyCount() > initialCount then
+			secured = true
+			break
+		end
+	end
+
+	return secured
+end
+
+local function executeEggInteraction(eggObj)
+	if not State.IsRunning or not eggObj or not eggObj.Parent then return false end
+	local _, hrp = getCharacterParts()
+	if not hrp then return false end
+
+	humanDelay(Config.MinPreDelay, Config.MaxPreDelay)
+	local interacted = false
+
+	pcall(function()
+		for _, prompt in ipairs(eggObj:GetDescendants()) do
+			if prompt:IsA("ProximityPrompt") then
+				prompt.RequiresLineOfSight = false
+				prompt.HoldDuration = 0
+				prompt.MaxActivationDistance = 999
+				prompt.Enabled = true
+				if fireproximityprompt then
+					fireproximityprompt(prompt)
+					interacted = true
+				end
+			end
+		end
+	end)
+
+	pcall(function()
+		local touchTarget = eggObj:IsA("BasePart") and eggObj or eggObj:FindFirstChildWhichIsA("BasePart", true)
+		if touchTarget and firetouchinterest then
+			firetouchinterest(hrp, touchTarget, 0)
+			task.wait(0.02)
+			firetouchinterest(hrp, touchTarget, 1)
+			interacted = true
+		end
+	end)
+
+	humanDelay(Config.WaitAtEgg, Config.WaitAtEgg + 0.1)
+	return interacted
+end
+
+--------------------------------------------------------------------------------
+-- 9. EGG SCANNER & CLASSIFIER
+--------------------------------------------------------------------------------
+local function getEggRarity(obj)
+	if not obj then return "unknown" end
+
+	local attr = obj:GetAttribute("Rarity") or obj:GetAttribute("EggRarity") or obj:GetAttribute("Tier")
+	if attr and type(attr) == "string" and attr ~= "" then return string.lower(attr) end
+
+	local valObj = obj:FindFirstChild("Rarity") or obj:FindFirstChild("EggRarity") or obj:FindFirstChild("Tier")
+	if valObj and valObj:IsA("StringValue") and valObj.Value ~= "" then return string.lower(valObj.Value) end
+
+	local name = string.lower(obj.Name)
+
+	if string.find(name, "blackhole") or string.find(name, "black hole")
+		or string.find(name, "solaris") or string.find(name, "cherub")
+		or string.find(name, "volcanic") or string.find(name, "ethereal") then
+		return "ethereal"
+	end
+
+	if string.find(name, "aurora") or string.find(name, "galaxy")
+		or string.find(name, "bloom") or string.find(name, "divine") then
+		return "divine"
+	end
+
+	if string.find(name, "diamond") or string.find(name, "crystal") or string.find(name, "skull")
+		or string.find(name, "asteroid") or string.find(name, "dominus") or string.find(name, "flaming")
+		or string.find(name, "sinister") or string.find(name, "soul") or string.find(name, "tidal")
+		or string.find(name, "mythic") then
+		return "mythic"
+	end
+
+	if string.find(name, "glass") or string.find(name, "golden") or string.find(name, "gold")
+		or string.find(name, "legendary") then
+		return "legendary"
+	end
+
+	if string.find(name, "mushroom") or string.find(name, "flower") or string.find(name, "slime")
+		or string.find(name, "ice") or string.find(name, "epic") then
+		return "epic"
+	end
+
+	if string.find(name, "cracked") or string.find(name, "easter") or string.find(name, "stone")
+		or string.find(name, "leaf") or string.find(name, "rare") then
+		return "rare"
+	end
+
+	if string.find(name, "white") or string.find(name, "brown") or string.find(name, "common") then
+		return "common"
+	end
+
+	return "unknown"
+end
+
+local function getRootEggObject(obj)
+	if not obj then return nil end
+	if obj.Parent and obj.Parent ~= workspace and obj.Parent:IsA("Model") then
+		local pName = string.lower(obj.Parent.Name)
+		if string.find(pName, "egg") or getEggRarity(obj.Parent) ~= "unknown" then
+			return obj.Parent
+		end
+	end
+	return obj
+end
+
+local function getActiveEggObjects()
+	local targetEggs = {}
+	local processedSet = {}
+	local targetRarity = string.lower(Config.TargetRarity)
+
+	local function processCandidate(candidate)
+		if not candidate or not candidate.Parent then return end
+
+		local eggObj = getRootEggObject(candidate)
+		if processedSet[eggObj] then return end
+
+		if Players:GetPlayerFromCharacter(eggObj) or (localPlayer.Character and eggObj:IsDescendantOf(localPlayer.Character)) then return end
+		if isEggBlacklisted(eggObj) or isEggOnPlot(eggObj) then return end
+
+		local eggName = string.lower(eggObj.Name)
+		local detectedRarity = getEggRarity(eggObj)
+
+		local isAnEgg = string.find(eggName, "egg") or (detectedRarity ~= "unknown")
+		if not isAnEgg then return end
+
+		local matches = (targetRarity == "all") or (detectedRarity == targetRarity)
+		if matches then
+			processedSet[eggObj] = true
+			table.insert(targetEggs, eggObj)
+		end
+	end
+
+	for _, obj in ipairs(workspace:GetDescendants()) do
+		if obj:IsA("Model") or obj:IsA("BasePart") then
+			processCandidate(obj)
+		end
+	end
+
+	return targetEggs
+end
+
+--------------------------------------------------------------------------------
+-- 10. CLEANUP & PERFORMANCE OPTIMIZER
+--------------------------------------------------------------------------------
+local function applyPerformanceBoost(enable)
+	if not enable then return end
+	task.spawn(function()
+		pcall(function()
+			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+			local terrain = workspace:FindFirstChildOfClass("Terrain")
+			if terrain then
+				terrain.WaterWaveSize = 0
+				terrain.WaterWaveSpeed = 0
+			end
+
+			for _, obj in ipairs(workspace:GetDescendants()) do
+				if obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Smoke") or obj:IsA("Fire") or obj:IsA("Sparkles") then
+					obj.Enabled = false
+				elseif obj:IsA("Beam") or obj:IsA("Highlight") then
+					obj.Enabled = false
+				end
+			end
+		end)
+	end)
+end
+
+local function cleanupAll()
+	State.IsRunning = false
+	State.IsCandyRunning = false
+	if State.CurrentTween then
+		pcall(function() State.CurrentTween:Cancel() end)
+		State.CurrentTween = nil
+	end
+	setNoClip(false)
+	disableScreenShake(false)
+
+	local _, hrp = getCharacterParts()
+	if hrp then
+		hrp.Anchored = false
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+
+	updateStatus("Idle")
+	updateCandyStatus("Idle")
+	task.defer(function() pcall(function() collectgarbage("step", 50) end) end)
+end
+
+local function serverHop()
+	local placeId = game.PlaceId
+	local curJob = game.JobId
+	local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Asc&limit=100"
+
+	local success, result = pcall(function()
+		return HttpService:JSONDecode(game:HttpGet(url))
+	end)
+
+	if success and result and result.data then
+		for _, server in ipairs(result.data) do
+			if server.playing < server.maxPlayers and server.id ~= curJob then
+				TeleportService:TeleportToPlaceInstance(placeId, server.id, localPlayer)
+				return
+			end
+		end
+	end
+	TeleportService:Teleport(placeId, localPlayer)
+end
+
+--------------------------------------------------------------------------------
+-- 11. FLUENT UI & RAYFIELD DEPTH STYLING
+--------------------------------------------------------------------------------
+local Window = Fluent:CreateWindow({
+	Title = "FluentPro",
+	SubTitle = "Rayfield Depth Edition",
+	TabWidth = 145,
+	Size = UDim2.fromOffset(560, 420),
+	Acrylic = false,
+	Theme = "Dark"
+})
+
+task.spawn(function()
+	task.wait(0.1)
+	pcall(function()
+		local root = Window.Root or (Window.Frame and Window.Frame.Parent)
+		if not root or not root:IsA("GuiObject") then return end
+
+		root.BackgroundColor3 = Color3.fromRGB(15, 16, 20)
+		local rootStroke = root:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke", root)
+		rootStroke.Color = Color3.fromRGB(42, 46, 58)
+		rootStroke.Thickness = 1.3
+
+		local shadow = Instance.new("ImageLabel")
+		shadow.Name = "RayfieldDepthShadow"
+		shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+		shadow.Position = UDim2.new(0.5, 0, 0.5, 0)
+		shadow.Size = UDim2.new(1, 38, 1, 38)
+		shadow.BackgroundTransparency = 1
+		shadow.Image = "rbxassetid://5587865193"
+		shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+		shadow.ImageTransparency = 0.45
+		shadow.ScaleType = Enum.ScaleType.Slice
+		shadow.SliceCenter = Rect.new(10, 10, 118, 118)
+		shadow.ZIndex = math.max(root.ZIndex - 1, 0)
+		shadow.Parent = root
+
+		shadow.Visible = root.Visible
+		root:GetPropertyChangedSignal("Visible"):Connect(function()
+			shadow.Visible = root.Visible
+		end)
+
+		local function applyRayfieldDepthToElement(elem)
+			if elem:IsA("Frame") and elem.Name ~= "RayfieldDepthShadow" then
+				elem.BackgroundColor3 = Color3.fromRGB(22, 24, 31)
+
+				local strk = elem:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke", elem)
+				strk.Color = Color3.fromRGB(36, 40, 52)
+				strk.Thickness = 0.9
+
+				local corner = elem:FindFirstChildOfClass("UICorner") or Instance.new("UICorner", elem)
+				corner.CornerRadius = UDim.new(0, 8)
+
+				elem.MouseEnter:Connect(function()
+					TweenService:Create(elem, TweenInfo.new(0.18), { BackgroundColor3 = Color3.fromRGB(28, 31, 40) }):Play()
+					TweenService:Create(strk, TweenInfo.new(0.18), { Color = Color3.fromRGB(56, 62, 80) }):Play()
+				end)
+				elem.MouseLeave:Connect(function()
+					TweenService:Create(elem, TweenInfo.new(0.18), { BackgroundColor3 = Color3.fromRGB(22, 24, 31) }):Play()
+					TweenService:Create(strk, TweenInfo.new(0.18), { Color = Color3.fromRGB(36, 40, 52) }):Play()
+				end)
+			end
+		end
+
+		for _, desc in ipairs(root:GetDescendants()) do
+			if desc.Name == "Item" or desc.Name == "Element" or (desc:IsA("Frame") and desc.Size.Y.Offset >= 30) then
+				applyRayfieldDepthToElement(desc)
+			end
+		end
+
+		root.DescendantAdded:Connect(function(desc)
+			task.wait()
+			if desc.Name == "Item" or desc.Name == "Element" or (desc:IsA("Frame") and desc.Size.Y.Offset >= 30) then
+				applyRayfieldDepthToElement(desc)
+			end
+		end)
+	end)
+end)
+
+--------------------------------------------------------------------------------
+-- 12. TAB HIERARCHY
+--------------------------------------------------------------------------------
+local Tabs = {
+	Main = Window:AddTab({ Title = "Main", Icon = "egg" }),
+	Halloween = Window:AddTab({ Title = "Halloween", Icon = "ghost" }),
+	Movement = Window:AddTab({ Title = "Movement", Icon = "navigation" }),
+	Targeting = Window:AddTab({ Title = "Targeting", Icon = "target" }),
+	Safety = Window:AddTab({ Title = "Safety", Icon = "shield" }),
+	Plot = Window:AddTab({ Title = "Plot & Base", Icon = "home" }),
+	Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+-- -------------------------------------------------------------
+-- TAB 1: MAIN HARVESTER (EGGS)
+-- -------------------------------------------------------------
+State.UIElements.StatusParagraph = Tabs.Main:AddParagraph({
+	Title = "Harvester Telemetry",
+	Content = "Status: Idle\nEggs Stolen: 0\nActive Target: None"
+})
+
+Tabs.Main:AddToggle("AutoStealEggToggle", {
+	Title = "Auto Steal Egg",
+	Description = "Master activation switch for autonomous egg harvesting",
+	Default = false,
+	Callback = function(Value)
+		State.IsRunning = Value
+
+		if State.IsRunning then
+			autoDetectMyPlot()
+			if Config.NoClipEnabled then setNoClip(true) end
+			if Config.RemoveShakeEnabled then disableScreenShake(true) end
+			if Config.PerformanceBoost then applyPerformanceBoost(true) end
+
+			task.spawn(function()
+				for cycle = 1, Config.RunCycles do
+					if not State.IsRunning then break end
+
+					updateStatus("Scanning Map For " .. Config.TargetRarity .. " Eggs...")
+					local candidateEggs = getActiveEggObjects()
+
+					if #candidateEggs == 0 then
+						if Config.AutoServerHop then
+							updateStatus("Map Depleted: Initiating Server Hop...")
+							task.wait(1.5)
+							serverHop()
+							break
+						else
+							updateStatus("No Target Eggs Found. Waiting...")
+							task.wait(2.5)
+						end
+					else
+						for _, eggObj in ipairs(candidateEggs) do
+							if not State.IsRunning then break end
+							if not eggObj or not eggObj.Parent then continue end
+
+							local eggPos = getObjectPosition(eggObj)
+							if not eggPos then continue end
+
+							State.CurrentTarget = eggObj
+							updateStatus("Flying To: " .. eggObj.Name)
+
+							local reached = smartMoveTo(eggPos, Config.OutboundSpeed, Vector3.new(0, 2.5, 0))
+							if not reached or not State.IsRunning or not eggObj.Parent then continue end
+
+							local _, hrp = getCharacterParts()
+							if hrp and (hrp.Position - eggPos).Magnitude <= 35 then
+								updateStatus("Securing: " .. eggObj.Name)
+								local pickedUp = executeEggInteraction(eggObj)
+
+								if not State.IsRunning then break end
+
+								if pickedUp then
+									State.EggsStolenCount = State.EggsStolenCount + 1
+									updateStatus("Returning To Base...")
+									local homePos = getMyPlotPosition()
+									smartMoveTo(homePos, Config.ReturnSpeed, Vector3.new(0, 2.5, 0))
+									humanDelay(0.2, 0.45)
+								else
+									State.FailedEggCache[eggObj] = os.clock() + Config.BlacklistDuration
+								end
+							end
+						end
+					end
+					task.defer(function() pcall(function() collectgarbage("step", 30) end) end)
+				end
+				cleanupAll()
+			end)
+		else
+			cleanupAll()
+		end
+	end
+})
+
+Tabs.Main:AddInput("CycleInput", {
+	Title = "Loop Cycles",
+	Description = "Maximum continuous cycles (1 - 1000)",
+	Default = tostring(Config.RunCycles),
+	Placeholder = "1 - 1000",
+	Numeric = true,
+	Finished = true,
+	Callback = function(Value)
+		local n = tonumber(Value)
+		Config.RunCycles = (n and n > 0) and math.min(math.floor(n), 1000) or 5
+	end
+})
+
+Tabs.Main:AddButton({
+	Title = "Force Stop & Clear Target",
+	Description = "Cancels active tween and clears state immediately",
+	Callback = function()
+		cleanupAll()
+		Fluent:Notify({ Title = "Harvester Reset", Content = "All active tasks cancelled.", Duration = 2.5 })
+	end
+})
+
+-- -------------------------------------------------------------
+-- TAB 2: HALLOWEEN EVENT (HYBRID ANTI-CHEAT PIPELINE)
+-- -------------------------------------------------------------
+State.UIElements.CandyParagraph = Tabs.Halloween:AddParagraph({
+	Title = "Halloween Telemetry",
+	Content = "Status: Idle\nTokens / Deposits: 0\nCarriedCandy: 0"
+})
+
+Tabs.Halloween:AddToggle("AutoStealCandyToggle", {
+	Title = "Auto Steal Candy (Hybrid Delivery)",
+	Description = "Instant teleport to candy, safe 80 studs/s cruise to CandyDropOff (Prevents CODE AT-XXXX)",
+	Default = false,
+	Callback = function(Value)
+		State.IsCandyRunning = Value
+
+		if State.IsCandyRunning then
+			getCandyDropOffPoint()
+			if Config.NoClipEnabled then setNoClip(true) end
+			if Config.RemoveShakeEnabled then disableScreenShake(true) end
+			if Config.PerformanceBoost then applyPerformanceBoost(true) end
+
+			pcall(function() localPlayer:SetAttribute("InHalloweenZone", true) end)
+
+			task.spawn(function()
+				while State.IsCandyRunning do
+					-- Step A: If already holding candy, deliver safely
+					if getCarriedCandyCount() > 0 then
+						executeTokenDeposit()
+					end
+
+					-- Step B: Scan active candy candidates
+					updateCandyStatus("Scanning for 3+ token candies...")
+					local candidates = getAllCandyCandidates()
+
+					local highValueQueue = {}
+					for _, c in ipairs(candidates) do
+						if c.Tokens >= Config.MinCandyTokens then
+							table.insert(highValueQueue, c)
+						end
+					end
+
+					local targetList = #highValueQueue > 0 and highValueQueue or (Config.AllowLesserTokensFallback and candidates or {})
+
+					if #targetList == 0 then
+						updateCandyStatus("Waiting for candies to spawn...")
+						task.wait(1.5)
+					else
+						for _, candy in ipairs(targetList) do
+							if not State.IsCandyRunning then break end
+							if not candy.Object or not candy.Object.Parent then continue end
+
+							State.CurrentCandyTarget = candy.Object
+							updateCandyStatus(string.format("Target: %s (+%d Tokens)", candy.Object.Name, candy.Tokens))
+
+							-- HYBRID STEP 1: Instant teleport to candy (hands empty, completely safe from anti-cheat)
+							if Config.FastOutboundTeleport then
+								safeInstantTeleport(CFrame.new(candy.Position + Vector3.new(0, 1.5, 0)))
+							else
+								smartMoveTo(candy.Position, Config.OutboundSpeed, Vector3.new(0, 1.5, 0))
+							end
+
+							if not State.IsCandyRunning then break end
+
+							local _, hrp = getCharacterParts()
+							if hrp then
+								updateCandyStatus(string.format("Grabbing +%d Candy...", candy.Tokens))
+								hrp.CFrame = CFrame.new(candy.Position + Vector3.new(0, 1, 0))
+
+								-- Verification Check: Remains until CarriedCandy increments
+								local successfullyGrabbed = attemptVerifiedPickup(candy)
+
+								if successfullyGrabbed then
+									if Config.PreDropOffDelay > 0 then
+										updateCandyStatus("Secured! Waiting " .. tostring(Config.PreDropOffDelay) .. "s delay...")
+										task.wait(Config.PreDropOffDelay)
+									end
+
+									-- HYBRID STEP 2: Smooth cruise at safe 80 studs/s into the square box
+									updateCandyStatus("Delivering safely to CandyDropOff (80 studs/s)...")
+									executeTokenDeposit()
+									task.wait(Config.CandyWaitDelay or 0.25)
+								else
+									State.FailedEggCache[candy.Object] = os.clock() + Config.BlacklistDuration
+									updateCandyStatus("Candy skipped. Checking next...")
+								end
+							end
+						end
+					end
+					task.wait(0.4)
+				end
+				cleanupAll()
+			end)
+		else
+			cleanupAll()
+		end
+	end
+})
+
+Tabs.Halloween:AddToggle("FastOutboundToggle", {
+	Title = "Instant Teleport to Candy (Empty Hands)",
+	Description = "Safely teleports to candy since anti-cheat ignores unladen movement",
+	Default = Config.FastOutboundTeleport,
+	Callback = function(val) Config.FastOutboundTeleport = val end
+})
+
+Tabs.Halloween:AddSlider("CarrySpeedSlider", {
+	Title = "Safe Delivery Velocity (Anti-Cheat)",
+	Description = "Keeps velocity <= 85 studs/s while carrying items to satisfy the server",
+	Default = Config.ReturnSpeed,
+	Min = 50,
+	Max = 95,
+	Rounding = 0,
+	Callback = function(val) Config.ReturnSpeed = tonumber(val) or 80 end
+})
+
+Tabs.Halloween:AddSlider("MinTokensSlider", {
+	Title = "Minimum Token Threshold",
+	Description = "Prioritizes candies awarding this many tokens or more (Default: 3)",
+	Default = Config.MinCandyTokens,
+	Min = 1,
+	Max = 5,
+	Rounding = 0,
+	Callback = function(val) Config.MinCandyTokens = tonumber(val) or 3 end
+})
+
+Tabs.Halloween:AddToggle("FallbackTokensToggle", {
+	Title = "Fallback to Lower Tokens",
+	Description = "Collects smaller candies if no 3+ token candies are currently spawned",
+	Default = Config.AllowLesserTokensFallback,
+	Callback = function(val) Config.AllowLesserTokensFallback = val end
+})
+
+Tabs.Halloween:AddSlider("PreDropOffDelaySlider", {
+	Title = "Pre-Deposit Departure Delay",
+	Description = "Pause after grabbing candy before traveling to CandyDropOff (seconds)",
+	Default = Config.PreDropOffDelay,
+	Min = 0,
+	Max = 4,
+	Rounding = 1,
+	Callback = function(val) Config.PreDropOffDelay = tonumber(val) or 0.3 end
+})
+
+Tabs.Halloween:AddButton({
+	Title = "Set Current Location As CandyDropOff",
+	Description = "Stand inside the CandyDropOff square box and click to save this exact position",
+	Callback = function()
+		local _, hrp = getCharacterParts()
+		if hrp then
+			State.CandyDropOffPosition = hrp.Position
+			State.CandyDropOffInstance = nil
+			Fluent:Notify({
+				Title = "CandyDropOff Saved",
+				Content = string.format("Coordinates: (%.1f, %.1f, %.1f)", hrp.Position.X, hrp.Position.Y, hrp.Position.Z),
+				Duration = 3.5
+			})
+		end
+	end
+})
+
+Tabs.Halloween:AddButton({
+	Title = "Fly to CandyDropOff Box Now",
+	Description = "Teleports directly inside the Workspace.CandyDropOff square box",
+	Callback = function()
+		local dropObj, pos = getCandyDropOffPoint()
+		if pos and pos ~= Vector3.zero then
+			safeInstantTeleport(CFrame.new(pos + Vector3.new(0, 0.5, 0)))
+			local label = dropObj and dropObj.Name or "CandyDropOff"
+			Fluent:Notify({ Title = "CandyDropOff", Content = "Arrived inside " .. label .. " box!", Duration = 2.5 })
+		else
+			Fluent:Notify({ Title = "Not Found", Content = "Click 'Set Current Location' inside the drop-off box!", Duration = 3 })
+		end
+	end
+})
+
+-- -------------------------------------------------------------
+-- TAB 3: MOVEMENT CONTROLS
+-- -------------------------------------------------------------
+Tabs.Movement:AddDropdown("NavModeDropdown", {
+	Title = "Flight & Navigation Mode",
+	Description = "Sky Cruise avoids all obstacles and barriers",
+	Values = {"Sky Cruise (Anti-Obstacle)", "Direct Tween (Fast)"},
+	Default = Config.MovementMode,
+	Callback = function(Value) Config.MovementMode = Value end
+})
+
+Tabs.Movement:AddSlider("OutboundVelocitySlider", {
+	Title = "Outbound Travel Speed",
+	Description = "Velocity while flying towards uncollected items (studs/s)",
+	Default = Config.OutboundSpeed,
+	Min = 50,
+	Max = 400,
+	Rounding = 0,
+	Callback = function(Value) Config.OutboundSpeed = tonumber(Value) or 200 end
+})
+
+Tabs.Movement:AddSlider("CruiseAltitudeSlider", {
+	Title = "Sky Cruise Altitude",
+	Description = "Height offset above ground obstacles (studs)",
+	Default = Config.CruiseAltitude,
+	Min = 10,
+	Max = 100,
+	Rounding = 0,
+	Callback = function(Value) Config.CruiseAltitude = tonumber(Value) or 30 end
+})
+
+-- -------------------------------------------------------------
+-- TAB 4: TARGETING (EGGS)
+-- -------------------------------------------------------------
+Tabs.Targeting:AddDropdown("RaritySelection", {
+	Title = "Target Rarity",
+	Description = "Filter eggs strictly by rarity",
+	Values = {"All", "Ethereal", "Divine", "Mythic", "Legendary", "Epic", "Rare", "Common"},
+	Default = Config.TargetRarity,
+	Callback = function(Value) Config.TargetRarity = Value end
+})
+
+Tabs.Targeting:AddSlider("PlotRadiusBoundary", {
+	Title = "Plot Safe Radius",
+	Description = "Ignores eggs within this radius from your base (studs)",
+	Default = Config.PlotRadius,
+	Min = 20,
+	Max = 150,
+	Rounding = 0,
+	Callback = function(Value) Config.PlotRadius = tonumber(Value) or 55 end
+})
+
+Tabs.Targeting:AddToggle("BoundingBoxCheckToggle", {
+	Title = "Rotated Plot Box Verification",
+	Description = "Calculates exact 3D plot prism boundary",
+	Default = Config.CheckBoundingBox,
+	Callback = function(Value) Config.CheckBoundingBox = Value end
+})
+
+-- -------------------------------------------------------------
+-- TAB 5: SAFETY, STEALTH & ANTI-DETECTION
+-- -------------------------------------------------------------
+Tabs.Safety:AddToggle("SmartNoClipToggle", {
+	Title = "Smart Floor-Safe No-Clip",
+	Description = "Prevents falling through ground while passing obstacles",
+	Default = Config.NoClipEnabled,
+	Callback = function(Value)
+		Config.NoClipEnabled = Value
+		if not State.IsRunning and not State.IsCandyRunning then setNoClip(Config.NoClipEnabled) end
+	end
+})
+
+Tabs.Safety:AddToggle("RemoveShakeToggle", {
+	Title = "Anti-Camera Shake",
+	Description = "Stabilizes viewport and camera offset",
+	Default = Config.RemoveShakeEnabled,
+	Callback = function(Value)
+		Config.RemoveShakeEnabled = Value
+		disableScreenShake(Config.RemoveShakeEnabled)
+	end
+})
+
+Tabs.Safety:AddToggle("HumanizeDelayToggle", {
+	Title = "Humanized Input Delays (Jitter)",
+	Description = "Randomizes interaction pauses to mimic human input",
+	Default = Config.HumanizeEnabled,
+	Callback = function(Value)
+		Config.HumanizeEnabled = Value
+	end
+})
+
+Tabs.Safety:AddSlider("PreDelaySlider", {
+	Title = "Pre-Pickup Delay",
+	Description = "Simulated reaction time before triggering prompt (seconds)",
+	Default = Config.MinPreDelay,
+	Min = 0.05,
+	Max = 0.8,
+	Rounding = 2,
+	Callback = function(Value) Config.MinPreDelay = tonumber(Value) or 0.15 end
+})
+
+-- -------------------------------------------------------------
+-- TAB 6: PLOT & BASE MANAGEMENT
+-- -------------------------------------------------------------
+Tabs.Plot:AddButton({
+	Title = "Set Current Location As Home Plot",
+	Description = "Saves your current character position as the plot return point",
+	Callback = function()
+		local _, hrp = getCharacterParts()
+		if hrp then
+			State.HomePlotPosition = hrp.Position
+			Fluent:Notify({
+				Title = "Plot Position Saved",
+				Content = string.format("Coordinates: (%.1f, %.1f, %.1f)", hrp.Position.X, hrp.Position.Y, hrp.Position.Z),
+				Duration = 3.5
+			})
+		end
+	end
+})
+
+Tabs.Plot:AddButton({
+	Title = "Auto-Detect My Plot",
+	Description = "Scans workspace for models and attributes owned by you",
+	Callback = function()
+		local detected = autoDetectMyPlot()
+		Fluent:Notify({
+			Title = "Plot Auto-Detect",
+			Content = string.format("Detected Base at: (%.1f, %.1f, %.1f)", detected.X, detected.Y, detected.Z),
+			Duration = 3.5
+		})
+	end
+})
+
+-- -------------------------------------------------------------
+-- TAB 7: PERFORMANCE & SETTINGS
+-- -------------------------------------------------------------
+Tabs.Settings:AddToggle("PerformanceBoostToggle", {
+	Title = "FPS Boost & Resource Optimizer",
+	Description = "Disables heavy particles, lighting shaders, and water mesh physics",
+	Default = Config.PerformanceBoost,
+	Callback = function(Value)
+		Config.PerformanceBoost = Value
+		if Config.PerformanceBoost then applyPerformanceBoost(true) end
+	end
+})
+
+Tabs.Settings:AddToggle("AutoServerHopToggle", {
+	Title = "Auto Server Hop When Cleared",
+	Description = "Teleports to fresh server once all target eggs are harvested",
+	Default = Config.AutoServerHop,
+	Callback = function(Value) Config.AutoServerHop = Value end
+})
+
+Tabs.Settings:AddButton({
+	Title = "Server Hop Now",
+	Description = "Immediately find and join a different server",
+	Callback = function() serverHop() end
+})
+
+Tabs.Settings:AddButton({
+	Title = "Run Garbage Collection",
+	Description = "Cleans unused memory to reduce client memory footprint",
+	Callback = function()
+		task.defer(function() pcall(function() collectgarbage("step", 50) end) end)
+		Fluent:Notify({ Title = "Memory Cleaned", Content = "Garbage collection executed.", Duration = 2 })
+	end
+})
+
+Window:SelectTab(1)
+
+--------------------------------------------------------------------------------
+-- 13. MOBILE & DESKTOP FLOATING TOGGLE
+--------------------------------------------------------------------------------
+task.spawn(function()
+	pcall(function()
+		local old = CoreGui:FindFirstChild("MobileFluentToggle")
+		if old then old:Destroy() end
+
+		local screenGui = Instance.new("ScreenGui")
+		screenGui.Name = "MobileFluentToggle"
+		screenGui.Parent = CoreGui
+		screenGui.ResetOnSpawn = false
+
+		local button = Instance.new("TextButton")
+		button.Name = "ToggleButton"
+		button.Parent = screenGui
+		button.Size = UDim2.new(0, 52, 0, 52)
+		button.Position = UDim2.new(0.04, 0, 0.22, 0)
+		button.BackgroundColor3 = Color3.fromRGB(18, 20, 26)
+		button.BorderSizePixel = 0
+		button.Text = "HUB"
+		button.TextColor3 = Color3.fromRGB(240, 240, 250)
+		button.TextSize = 14
+		button.Font = Enum.Font.GothamBold
+		button.Active = true
+
+		local corner = Instance.new("UICorner", button)
+		corner.CornerRadius = UDim.new(0, 12)
+
+		local stroke = Instance.new("UIStroke", button)
+		stroke.Thickness = 1.5
+		stroke.Color = Color3.fromRGB(50, 56, 72)
+
+		local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+
+		button.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging, dragStart, startPos = true, input.Position, button.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then dragging = false end
+				end)
+			end
+		end)
+
+		button.InputChanged:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+				dragInput = input
+			end
+		end)
+
+		UserInputService.InputChanged:Connect(function(input)
+			if input == dragInput and dragging then
+				local delta = input.Position - dragStart
+				button.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end)
+
+		local isVisible = true
+		button.MouseButton1Click:Connect(function()
+			if dragging then return end
+			isVisible = not isVisible
+			if Window and Window.Root then Window.Root.Visible = isVisible end
+		end)
+	end)
+end)
+
+Fluent:Notify({
+	Title = "FluentPro Enterprise",
+	Content = "Hybrid pipeline active: Instant outbound teleport + safe 80 studs/s delivery!",
+	Duration = 4
+})
