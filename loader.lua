@@ -750,7 +750,7 @@ local function attemptVerifiedPickup(candyEntry)
 			collectRemote:FireServer(candyEntry.Object.Name)
 		end
 
-		task.wait(0.25)
+		task.wait(0.15)
 
 		if getCarriedCandyCount() > initialCount then
 			secured = true
@@ -1249,7 +1249,7 @@ Tabs.Halloween:AddToggle("AutoStealCandyToggle", {
 							end
 						end
 					end
-					task.wait(0.4)
+					task.wait(0.1)
 				end
 				cleanupAll()
 			end)
@@ -1291,7 +1291,7 @@ Tabs.Halloween:AddSlider("CarrySpeedSlider", {
 	Title = "Delivery Flight Speed (Studs/s)",
 	Description = "Speed while smoothly flying to CandyDropOff (Default: 200 studs/s, Max: 500)",
 	Default = Config.ReturnSpeed,
-	Min = 50,
+	Min = 500,
 	Max = 1000,
 	Rounding = 0,
 	Callback = function(val) Config.ReturnSpeed = tonumber(val) or 200 end
