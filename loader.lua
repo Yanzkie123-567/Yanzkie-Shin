@@ -1434,7 +1434,7 @@ Tabs.Halloween:AddSlider("CarrySpeedSlider", {
 	Description = "Speed while smoothly flying to CandyDropOff (Default: 200 studs/s, Max: 500)",
 	Default = Config.ReturnSpeed,
 	Min = 50,
-	Max = 500,
+	Max = 1000,
 	Rounding = 0,
 	Callback = function(val) Config.ReturnSpeed = tonumber(val) or 200 end
 })
