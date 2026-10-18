@@ -1457,7 +1457,7 @@ Tabs.Halloween:AddSlider("WatchdogTimeoutSlider", {
 	Description = "Time before watchdog automatically purges stuck inventory to CandyDropOff (Set to 5.30s)",
 	Default = Config.WatchdogTimeout,
 	Min = 2.0,
-	Max = 15.0,
+	Max = 10.0,
 	Rounding = 2,
 	Callback = function(val)
 		Config.WatchdogTimeout = tonumber(val) or 5.30
@@ -1496,8 +1496,8 @@ Tabs.Halloween:AddSlider("CarrySpeedSlider", {
 	Title = "Delivery Flight Speed (Studs/s)",
 	Description = "Speed while smoothly flying to CandyDropOff (Default: 200 studs/s, Max: 500)",
 	Default = Config.ReturnSpeed,
-	Min = 50,
-	Max = 500,
+	Min = 100,
+	Max = 1000,
 	Rounding = 0,
 	Callback = function(val) Config.ReturnSpeed = tonumber(val) or 200 end
 })
