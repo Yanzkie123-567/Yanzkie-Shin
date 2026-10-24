@@ -1594,8 +1594,8 @@ Tabs.Halloween:AddSlider("CarrySpeedSlider", {
 	Title = "Delivery Flight Speed (Studs/s)",
 	Description = "Speed while smoothly flying to CandyDropOff (Default: 200 studs/s, Max: 500)",
 	Default = Config.ReturnSpeed,
-	Min = 50,
-	Max = 500,
+	Min = 100,
+	Max = 640,
 	Rounding = 0,
 	Callback = function(val) Config.ReturnSpeed = tonumber(val) or 200 end
 })
@@ -1641,8 +1641,8 @@ Tabs.Movement:AddSlider("OutboundVelocitySlider", {
 	Title = "Outbound Travel Speed",
 	Description = "Velocity while flying towards targets (Default: 200 studs/s, Max: 500)",
 	Default = Config.OutboundSpeed,
-	Min = 50,
-	Max = 500,
+	Min = 100,
+	Max = 640,
 	Rounding = 0,
 	Callback = function(Value) Config.OutboundSpeed = tonumber(Value) or 200 end
 })
@@ -1651,8 +1651,8 @@ Tabs.Movement:AddSlider("CarryVelocitySlider", {
 	Title = "Candy Return Flight Speed",
 	Description = "Velocity while returning with candy (Default: 200 studs/s, Max: 500)",
 	Default = Config.ReturnSpeed,
-	Min = 30,
-	Max = 500,
+	Min = 100,
+	Max = 640,
 	Rounding = 0,
 	Callback = function(Value) Config.ReturnSpeed = tonumber(Value) or 200 end
 })
@@ -1661,8 +1661,8 @@ Tabs.Movement:AddSlider("EggCarrySpeedSlider", {
 	Title = "Egg Safe Return Speed (Anti-Cheat)",
 	Description = "Speed when carrying eggs to base (Keeps <= 80 to prevent CODE AT-XXXX errors)",
 	Default = Config.EggReturnSpeed,
-	Min = 40,
-	Max = 120,
+	Min = 100,
+	Max = 640,
 	Rounding = 0,
 	Callback = function(val) Config.EggReturnSpeed = tonumber(val) or 75 end
 })
