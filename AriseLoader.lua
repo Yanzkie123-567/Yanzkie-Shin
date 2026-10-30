@@ -11,7 +11,7 @@ local localPlayer = Players.LocalPlayer
 
 -- Initialize Window
 local Window = Rayfield:CreateWindow({
-    Name = "Goomba Hub | Arise Crossover [Full Master Edition]",
+    Name = "Shini Hub | Arise Crossover [Full Master Edition]",
     Icon = 0,
     LoadingTitle = "Arise Crossover Master",
     LoadingSubtitle = "Every Feature Integrated & Optimized",
