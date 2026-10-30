@@ -32,7 +32,7 @@ end
 
 -- Initialize Rayfield Window
 local Window = Rayfield:CreateWindow({
-    Name = "Goomba Hub | Arise Crossover",
+    Name = "Shinihi Hub | Arise Crossover",
     Icon = 0,
     LoadingTitle = "Arise Crossover Loaded",
     LoadingSubtitle = "Complete Sea 1, 2, 3 & Mounts Edition",
